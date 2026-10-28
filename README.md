@@ -1,3 +1,6 @@
+# Important
+This repository was originally created for a pull request, but it was rejected for valid reasons. I have decided to keep the repository for anyone still wanting a nix flake (with support for configurations) and will try to keep it up to date.
+
 # Faugus
 A simple and lightweight app for running Windows games using [UMU-Launcher](https://github.com/Open-Wine-Components/umu-launcher)
 
@@ -41,7 +44,7 @@ sudo rm -r ~/faugus-launcher
 ```
 {
   inputs.faugus-launcher = {
-    url = "github:Faugus/faugus-launcher";
+    url = "github:LilySylvee/faugus-launcher";
     inputs.nixpkgs.follows = "nixpkgs";
   };
 }
