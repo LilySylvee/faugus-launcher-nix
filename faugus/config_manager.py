@@ -1,5 +1,5 @@
 from faugus.language_config import *
-from faugus.utils import load_json_file, save_json_file
+from faugus.core import load_json_file, save_json_file
 
 
 class ConfigManager:
@@ -9,6 +9,7 @@ class ConfigManager:
             'default-prefix': PREFIXES_DIR,
             'mangohud': 'False',
             'gamemode': 'False',
+            'discord-rpc-enabled': 'False',
             'sdl-enabled': 'False',
             'no-sleep-enabled': 'False',
             'default-runner': 'Proton-CachyOS Latest',

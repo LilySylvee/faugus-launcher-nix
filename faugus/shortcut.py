@@ -19,7 +19,7 @@ GLib.set_prgname("io.github.Faugus.faugus-launcher")
 _ = setup_gettext('faugus-launcher')
 
 
-class CreateShortcut(Gtk.ApplicationWindow, HiDpiMixin):
+class CreateShortcut(Gtk.ApplicationWindow, HiDpiMixin, HookEntriesMixin, LaunchArgumentsMixin, AddAppMixin, LosslessMixin):
     def __init__(self, file_path):
         super().__init__(title="Faugus")
         apply_titlebar_preference(self)
@@ -35,7 +35,9 @@ class CreateShortcut(Gtk.ApplicationWindow, HiDpiMixin):
         self.icon_converted = os.path.expanduser(f'{self.icons_path}/icon_temp/icon.png')
         self.icon_temp = f'{self.icons_path}/icon_temp.png'
 
-        init_addon_defaults(self)
+        self.launch_arguments_editor = LaunchArgumentsEditor()
+        self.addapp_panel = AddAppPanel(self)
+        self.lossless_panel = LosslessPanel(self)
 
         self.label_title = Gtk.Label(label=_("Title"))
         self.label_title.set_halign(Gtk.Align.START)
@@ -44,31 +46,10 @@ class CreateShortcut(Gtk.ApplicationWindow, HiDpiMixin):
         self.entry_title.set_has_tooltip(True)
         self.entry_title.connect("query-tooltip", on_entry_query_tooltip)
 
-        self.label_protonfix = Gtk.Label(label="Protonfix")
-        self.label_protonfix.set_halign(Gtk.Align.START)
-        self.entry_protonfix = Gtk.Entry()
-        self.entry_protonfix.set_tooltip_text("UMU ID")
-        self.button_search_protonfix = Gtk.Button()
-        self.button_search_protonfix.set_child(
-            Gtk.Image.new_from_icon_name("system-search-symbolic"))
-        self.button_search_protonfix.connect("clicked", on_button_search_protonfix_clicked)
-        self.button_search_protonfix.set_size_request(50, -1)
-
         self.label_game_arguments = Gtk.Label(label=_("Game Arguments"))
         self.label_game_arguments.set_halign(Gtk.Align.START)
         self.entry_game_arguments = Gtk.Entry()
         self.entry_game_arguments.set_tooltip_text("-d3d11 -fullscreen")
-
-        self.button_launch_settings = Gtk.Button(label=_("Launch Settings"))
-        self.button_launch_settings.connect("clicked", self.on_button_launch_settings_clicked)
-
-        self.button_addapp = Gtk.Button(label=_("Additional Application"))
-        self.button_addapp.connect("clicked", self.on_button_addapp_clicked)
-        self.button_addapp.set_tooltip_text(
-            _("Additional application to run with the game"))
-
-        self.button_lossless = Gtk.Button(label=_("Lossless Scaling Frame Generation"))
-        self.button_lossless.connect("clicked", self.on_button_lossless_clicked)
 
         self.button_shortcut_icon = Gtk.Button()
         self.button_shortcut_icon.set_size_request(120, -1)
@@ -101,37 +82,20 @@ class CreateShortcut(Gtk.ApplicationWindow, HiDpiMixin):
 
         self.grid_title = build_grid(margin_bottom=False)
 
-        self.grid_protonfix = build_grid(margin_bottom=False)
-
-        self.grid_launch_settings = build_grid(margin_bottom=False)
+        self.grid_pre_launch, self.entry_pre_launch = build_hook_command_grid(
+            self, _("Pre-launch"), "pre_launch", _("Command or script to run before the game"))
+        self.grid_post_launch, self.entry_post_launch = build_hook_command_grid(
+            self, _("Post-launch"), "post_launch", _("Command or script to run after the game"))
 
         self.grid_game_arguments = build_grid(margin_bottom=False)
-
-        self.grid_lossless = build_grid(margin_bottom=False)
-
-        self.grid_addapp = build_grid(margin_bottom=False)
 
         self.grid_title.attach(self.label_title, 0, 0, 4, 1)
         self.grid_title.attach(self.entry_title, 0, 1, 4, 1)
         self.entry_title.set_hexpand(True)
 
-        self.grid_protonfix.attach(self.label_protonfix, 0, 0, 1, 1)
-        self.grid_protonfix.attach(self.entry_protonfix, 0, 1, 3, 1)
-        self.entry_protonfix.set_hexpand(True)
-        self.grid_protonfix.attach(self.button_search_protonfix, 3, 1, 1, 1)
-
         self.grid_game_arguments.attach(self.label_game_arguments, 0, 0, 4, 1)
         self.grid_game_arguments.attach(self.entry_game_arguments, 0, 1, 4, 1)
         self.entry_game_arguments.set_hexpand(True)
-
-        self.grid_launch_settings.attach(self.button_launch_settings, 0, 0, 1, 1)
-        self.button_launch_settings.set_hexpand(True)
-
-        self.grid_addapp.attach(self.button_addapp, 0, 0, 1, 1)
-        self.button_addapp.set_hexpand(True)
-
-        self.grid_lossless.attach(self.button_lossless, 0, 0, 1, 1)
-        self.button_lossless.set_hexpand(True)
 
         self.grid_tools = build_grid(column_homogeneous=True)
         self.grid_tools.attach(self.checkbox_mangohud, 0, 0, 1, 1)
@@ -145,22 +109,43 @@ class CreateShortcut(Gtk.ApplicationWindow, HiDpiMixin):
 
         bottom_box = build_bottom_button_box(self.button_cancel, self.button_ok)
 
+        box_general = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        box_general.append(self.grid_title)
+        box_general.append(self.grid_game_arguments)
+        box_general.append(self.grid_pre_launch)
+        box_general.append(self.grid_post_launch)
+        box_general.append(self.grid_tools)
+
+        settings_stack = Gtk.Stack()
+        settings_stack.add_named(box_general, "general")
+        settings_stack.add_named(self.launch_arguments_editor.widget, "launch_arguments")
+        settings_stack.add_named(self.addapp_panel.widget, "addapp")
+        settings_stack.add_named(self.lossless_panel.widget, "lossless")
+
+        self.combobox_settings = IdComboBox()
+        self.combobox_settings.append("general", _("General"))
+        self.combobox_settings.append("launch_arguments", _("Launch Arguments"))
+        self.combobox_settings.append("addapp", _("Additional Application"))
+        self.combobox_settings.append("lossless", _("Lossless Scaling Frame Generation"))
+        self.combobox_settings.set_active_id("general")
+        self.combobox_settings.connect("changed", lambda combobox: settings_stack.set_visible_child_name(combobox.get_active_id()))
+        self.combobox_settings.set_hexpand(True)
+
+        grid_settings_section = build_grid(margin_bottom=False)
+        grid_settings_section.attach(self.combobox_settings, 0, 0, 1, 1)
+
         self.box_main = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        self.box_main.append(self.grid_title)
-        self.box_main.append(self.grid_protonfix)
-        self.box_main.append(self.grid_game_arguments)
-        self.box_main.append(self.grid_launch_settings)
-        self.box_main.append(self.grid_addapp)
-        self.box_main.append(self.grid_lossless)
-        self.box_main.append(self.grid_tools)
+        self.box_main.set_size_request(320, -1)
+        self.box_main.append(grid_settings_section)
+        self.box_main.append(settings_stack)
 
         self.load_config()
 
         disable_mangohud_gamemode_if_missing(self)
 
         if not os.path.exists(LSFGVK_PATH):
-            self.button_lossless.set_sensitive(False)
-            self.button_lossless.set_tooltip_text(_("Vulkan Layer not found"))
+            self.lossless_panel.widget.set_sensitive(False)
+            self.lossless_panel.widget.set_tooltip_text(_("Vulkan Layer not found"))
 
         frame.set_child(self.box_main)
         self.box.append(frame)
@@ -184,35 +169,18 @@ class CreateShortcut(Gtk.ApplicationWindow, HiDpiMixin):
         file_path = self.file_path
         icon_temp = self.icon_temp
 
+        def apply_title(title):
+            if not self.entry_title.get_text().strip():
+                self.entry_title.set_text(title)
+            return False
+
         def extract():
+            title = extract_exe_title(file_path) or os.path.splitext(os.path.basename(file_path))[0]
+            if title:
+                GLib.idle_add(apply_title, title)
             GLib.idle_add(apply_icon, extract_ico(file_path, icon_temp))
 
         run_in_background(extract)
-
-    def on_button_launch_settings_clicked(self, widget):
-        def on_result(result, pre_launch, post_launch):
-            self.launch_arguments = result
-            self.pre_launch = pre_launch
-            self.post_launch = post_launch
-        show_launch_arguments_dialog(self, self.launch_arguments, self.pre_launch, self.post_launch, on_result)
-
-    def on_button_addapp_clicked(self, widget):
-        def on_result(result):
-            (self.addapp_enabled, self.addapp,
-             self.addapp_delay, self.addapp_first) = result
-        show_addapp_dialog(
-            self, self.addapp_enabled, self.addapp,
-            self.addapp_delay, self.addapp_first, on_result)
-
-    def on_button_lossless_clicked(self, widget):
-        def on_result(result):
-            (self.lossless_enabled, self.lossless_multiplier,
-             self.lossless_flow, self.lossless_performance,
-             self.lossless_hdr, self.lossless_present) = result
-        show_lossless_dialog(
-            self, self.lossless_enabled, self.lossless_multiplier,
-            self.lossless_flow, self.lossless_performance,
-            self.lossless_hdr, self.lossless_present, on_result)
 
     def load_config(self):
         cfg = ConfigManager()
@@ -243,6 +211,9 @@ class CreateShortcut(Gtk.ApplicationWindow, HiDpiMixin):
             self.set_sensitive(True)
             return
 
+        self.launch_arguments_editor.save_presets()
+        self.lossless_panel.save_location()
+
         title = self.entry_title.get_text()
         title_formatted = format_title(title)
 
@@ -258,12 +229,13 @@ class CreateShortcut(Gtk.ApplicationWindow, HiDpiMixin):
         if not os.path.exists(new_icon_path):
             new_icon_path = FAUGUS_PNG
 
-        protonfix = self.entry_protonfix.get_text()
-
         env_vars = []
         other_args = []
-        for arg in self.launch_arguments.split():
-            if "=" in arg and not arg.startswith("-"):
+        for arg in self.launch_arguments.splitlines():
+            arg = arg.strip()
+            if not arg:
+                continue
+            if is_env_assignment(arg):
                 env_vars.append(arg)
             else:
                 other_args.append(arg)
@@ -278,8 +250,6 @@ class CreateShortcut(Gtk.ApplicationWindow, HiDpiMixin):
             command_parts.append("PROTON_PREFER_SDL=1")
         if self.checkbox_no_sleep.get_active():
             command_parts.append("NO_SLEEP=1")
-        if protonfix:
-            command_parts.append(f'GAMEID={protonfix}')
         if launch_arguments:
             command_parts.append(launch_arguments)
         command_parts.extend(build_lossless_env(self.lossless_enabled, self.lossless_multiplier, self.lossless_flow, self.lossless_performance, self.lossless_hdr, self.lossless_present))
@@ -304,15 +274,15 @@ class CreateShortcut(Gtk.ApplicationWindow, HiDpiMixin):
 
         hook_args = ""
         if self.pre_launch:
-            hook_args += f' --pre-launch "{self.pre_launch}"'
+            hook_args += f' --pre-launch {quote_desktop_exec_arg(self.pre_launch)}'
         if self.post_launch:
-            hook_args += f' --post-launch "{self.post_launch}"'
+            hook_args += f' --post-launch {quote_desktop_exec_arg(self.post_launch)}'
 
         exec_prefix = f"flatpak run --command={LAUNCHER_PATH} io.github.Faugus.faugus-launcher" if IS_FLATPAK else LAUNCHER_PATH
         desktop_file_content = (
             f'[Desktop Entry]\n'
             f'Name={title}\n'
-            f'Exec={exec_prefix} {LAUNCHER_MODULE_ARGS}--run "{command}"{hook_args}\n'
+            f'Exec={exec_prefix} {LAUNCHER_MODULE_ARGS}--run {quote_desktop_exec_arg(command)}{hook_args}\n'
             f'Icon={new_icon_path}\n'
             f'Type=Application\n'
             f'Categories=Game;\n'
@@ -359,7 +329,12 @@ class CreateShortcut(Gtk.ApplicationWindow, HiDpiMixin):
         self.entry_title.remove_css_class("entry")
 
         if not title:
+            self.combobox_settings.set_active_id("general")
             mark_invalid_widget(self.entry_title)
+            return False
+
+        if not self.lossless_panel.validate():
+            self.combobox_settings.set_active_id("lossless")
             return False
 
         return True

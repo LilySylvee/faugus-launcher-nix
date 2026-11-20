@@ -24,7 +24,7 @@ from faugus.migration import fix_legacy_shortcut_icons
 from faugus.main_screen_nav import adjust_widget_value, carrousel_move_coalesced, focus_bottom_bar_by_column, focus_flowbox_child, focus_top_bar, navigate_focus
 from faugus.tray_only import spawn as tray_only_spawn
 
-VERSION = "2.5.4"
+VERSION = "2.5.9"
 
 GLib.set_prgname(APP_ID)
 
@@ -113,6 +113,8 @@ class Main(Gtk.ApplicationWindow, HiDpiMixin):
     _background_time = 0
     _background_source = None
     _background_delay_source = None
+    _carrousel_scroll_accum = 0.0
+    _carrousel_scroll_time = 0
 
     def __init__(self, app):
         super().__init__(application=app, title="Faugus")
@@ -394,7 +396,7 @@ class Main(Gtk.ApplicationWindow, HiDpiMixin):
             item = self.flowbox.get_child_at_pos(int(x), int(y))
             self.on_item_right_click(item, x, y)
 
-        right_click.connect("pressed", on_right_click)
+        right_click.connect("released", on_right_click)
         self.flowbox.add_controller(right_click)
 
         file_drop_target = Gtk.DropTarget.new(Gdk.FileList, Gdk.DragAction.COPY)
@@ -1488,11 +1490,13 @@ class Main(Gtk.ApplicationWindow, HiDpiMixin):
             fb_child._dnd_ready = True
 
             def on_prepare(source, x, y):
+                fb_child = source.get_widget()
                 self._drag_source_id = fb_child.game.gameid
                 self.flowbox.select_child(fb_child)
                 return Gdk.ContentProvider.new_for_value(fb_child.game.gameid)
 
             def on_drag_begin(source, drag):
+                fb_child = source.get_widget()
                 self.set_drag_icon(source, fb_child.game, fb_child)
 
             def on_drag_end(source, drag, delete_data):
@@ -1508,6 +1512,7 @@ class Main(Gtk.ApplicationWindow, HiDpiMixin):
             fb_child.add_controller(drag_source)
 
             def on_drop_motion(target, x, y):
+                fb_child = target.get_widget()
                 if self.current_sort_id != "custom" or not getattr(self, '_drag_source_id', None):
                     return 0
 
@@ -1813,7 +1818,7 @@ class Main(Gtk.ApplicationWindow, HiDpiMixin):
 
         right_click = Gtk.GestureClick()
         right_click.set_button(Gdk.BUTTON_SECONDARY)
-        right_click.connect("pressed", lambda g, n, x, y, slot=slot: self.on_carrousel_slot_right_click(slot, x, y))
+        right_click.connect("released", lambda g, n, x, y, slot=slot: self.on_carrousel_slot_right_click(slot, x, y))
         card.add_controller(right_click)
 
         def on_prepare(source, x, y, slot=slot):
@@ -1870,8 +1875,9 @@ class Main(Gtk.ApplicationWindow, HiDpiMixin):
         try:
             if game and game.icon:
                 if os.path.isfile(game.icon):
-                    pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(game.icon, 48, 48, True)
-                    source.set_icon(Gdk.Texture.new_for_pixbuf(pixbuf), 24, 24)
+                    scale = self.device_scale()
+                    texture = texture_from_pixbuf(load_resized_pixbuf(game.icon, 48 * scale, 48 * scale), True)
+                    source.set_icon(HiDpiPaintable(texture, 48, 48), 24, 24)
                 else:
                     theme = Gtk.IconTheme.get_for_display(Gdk.Display.get_default())
                     icon_paintable = theme.lookup_icon(
@@ -1996,6 +2002,10 @@ class Main(Gtk.ApplicationWindow, HiDpiMixin):
             self.layout_carrousel_slot(slot, slot.get("visual_offset", slot["offset"]))
 
     def layout_carrousel_slot(self, slot, offset):
+        if getattr(slot["box"], "game", None) is None:
+            slot["box"].set_opacity(0.0)
+            return
+
         scale, opacity = self.carrousel_scale_opacity(offset)
         radius = getattr(self, 'carrousel_radius', 3)
         d = abs(offset)
@@ -2132,6 +2142,8 @@ class Main(Gtk.ApplicationWindow, HiDpiMixin):
                 slot["style_provider"].load_from_data(
                     b"entry.flowbox-entry.cover-container.carrousel-cover-box { transition: none; box-shadow: none; }"
                 )
+            self.schedule_background_update()
+            self.update_icon()
             return
 
         self.carrousel_index %= n
@@ -2275,6 +2287,10 @@ class Main(Gtk.ApplicationWindow, HiDpiMixin):
         return navigate_focus(direction)
 
     def on_search_entry_key(self, controller, keyval, keycode, state):
+        if keyval == Gdk.KEY_Escape:
+            self.leave_search()
+            return True
+
         if keyval not in (Gdk.KEY_Left, Gdk.KEY_Right):
             return False
 
@@ -2308,6 +2324,18 @@ class Main(Gtk.ApplicationWindow, HiDpiMixin):
         if delta == 0:
             return False
 
+        now = GLib.get_monotonic_time()
+        if now - self._carrousel_scroll_time < 40000:
+            return True
+
+        if self._carrousel_scroll_accum * delta < 0:
+            self._carrousel_scroll_accum = 0.0
+        self._carrousel_scroll_accum += delta
+        if abs(self._carrousel_scroll_accum) < 0.999:
+            return True
+
+        self._carrousel_scroll_accum = 0.0
+        self._carrousel_scroll_time = now
         self.carrousel_fixed.grab_focus()
         self.on_carrousel_focus_changed(self.carrousel_fixed, None)
         carrousel_move_coalesced(self, 1 if delta > 0 else -1)
@@ -2336,10 +2364,7 @@ class Main(Gtk.ApplicationWindow, HiDpiMixin):
         if not game:
             return
 
-        if x is not None and y is not None:
-            rect = self.pointing_rect(x, y)
-        else:
-            rect = self.pointing_rect(0, 0, slot["box"].get_width() or 1)
+        rect = self.pointing_rect(0, 0, slot["box"].get_width() or 1)
         self.open_context_menu(game, slot["box"], rect)
 
         def on_menu_closed(popover):
@@ -2967,13 +2992,7 @@ class Main(Gtk.ApplicationWindow, HiDpiMixin):
 
         game = self.selected()
 
-        rect = None
-        if x is not None and y is not None:
-            translated = self.flowbox.translate_coordinates(item, x, y)
-            if translated is not None:
-                rect = self.pointing_rect(*translated)
-        else:
-            rect = self.pointing_rect(0, 0, item.get_width() or 1)
+        rect = self.pointing_rect(0, 0, item.get_width() or 1)
         self.open_context_menu(game, item, rect)
         self.context_menu.popup()
 
@@ -2981,6 +3000,14 @@ class Main(Gtk.ApplicationWindow, HiDpiMixin):
         rect = Gdk.Rectangle()
         rect.x, rect.y, rect.width, rect.height = int(x), int(y), width, 1
         return rect
+
+    def anchor_menu_to_base(self, popover, parent, rect):
+        ok, bounds = popover.get_child().compute_bounds(parent)
+        if ok and bounds.get_y() < rect.y:
+            rect.y = max(parent.get_height() - 1, 0)
+            popover.set_pointing_to(rect)
+            popover.set_position(Gtk.PositionType.TOP)
+        return GLib.SOURCE_REMOVE
 
     def open_context_menu(self, game, parent, rect):
         if self.context_menu is not None and self.context_menu.get_parent():
@@ -2991,6 +3018,7 @@ class Main(Gtk.ApplicationWindow, HiDpiMixin):
         self.context_menu.set_parent(parent)
         if rect is not None:
             self.context_menu.set_pointing_to(rect)
+            self.context_menu.connect("map", lambda popover: GLib.idle_add(self.anchor_menu_to_base, popover, parent, rect))
         self.context_menu.connect("closed", lambda popover: play_ui_sound("navigate"))
         play_ui_sound("navigate")
 
@@ -3591,8 +3619,9 @@ class Main(Gtk.ApplicationWindow, HiDpiMixin):
             command_parts.append(f"WINEPREFIX='{prefix}'")
         if runner:
             command_parts.append(f"PROTONPATH='{resolve_protonpath(runner)}'")
-        for arg in expand_path(game.launch_arguments).split():
-            if "=" in arg and not arg.startswith("-"):
+        for arg in expand_path(game.launch_arguments).splitlines():
+            arg = arg.strip()
+            if is_env_assignment(arg):
                 command_parts.append(arg)
         if escaped_file_run.endswith(".reg"):
             command_parts.append(f"'{UMU_RUN}' regedit '{escaped_file_run}'")
@@ -3859,7 +3888,22 @@ class Main(Gtk.ApplicationWindow, HiDpiMixin):
     def on_item_double_click(self, item):
         self.play_or_notify(self.selected())
 
+    def leave_search(self):
+        game = self.selected()
+        self.entry_search.set_text("")
+        if getattr(self, '_carrousel_search_source', None):
+            GLib.source_remove(self._carrousel_search_source)
+            self._carrousel_search_source = None
+        if game:
+            self.select_game_by_title(game.title)
+        else:
+            self.select_first_child()
+
     def on_key_press_event(self, controller, keyval, keycode, state):
+        if keyval == Gdk.KEY_f and state & Gdk.ModifierType.CONTROL_MASK:
+            self.entry_search.grab_focus()
+            return True
+
         if keyval == Gdk.KEY_h and state & Gdk.ModifierType.CONTROL_MASK:
             try:
                 config = ConfigManager()
@@ -3952,6 +3996,7 @@ class Main(Gtk.ApplicationWindow, HiDpiMixin):
         self.steam_user = cfg.config.get('steam-user', 'all')
 
     def load_games(self):
+        schedule_malloc_trim()
         games_data = load_json_file(GAMES_JSON, [])
 
         self.games.clear()
@@ -4193,9 +4238,6 @@ class Main(Gtk.ApplicationWindow, HiDpiMixin):
         zoom_width = int(230 * (zoom_pct / 100.0))
         return zoom_width, int(zoom_width * 1.5)
 
-    def device_scale(self):
-        return max(1, self.get_scale_factor())
-
     def icon_path(self, game):
         return game.icon if os.path.isfile(game.icon) else FAUGUS_PNG
 
@@ -4324,6 +4366,7 @@ class Main(Gtk.ApplicationWindow, HiDpiMixin):
         self.flowbox.invalidate_filter()
 
         self.select_first_visible_child()
+        self.update_overview_panel()
 
     def on_search_activate(self, entry):
         game = self.selected()
@@ -4372,7 +4415,7 @@ class Main(Gtk.ApplicationWindow, HiDpiMixin):
             apply_interface_customization(
                 settings_dialog.interface_theme,
                 settings_dialog.accent_color,
-                settings_dialog.combobox_theme_engine.get_active_id(),
+                self.theme_engine,
             )
             self.apply_overview_panel_width()
 
@@ -4497,14 +4540,19 @@ class Main(Gtk.ApplicationWindow, HiDpiMixin):
         game_directory = os.path.dirname(expand_path(game.path))
         cwd = game_directory if game_directory and os.path.isdir(game_directory) else None
 
-        cmd = [sys.executable, "-m", "faugus.runner", "--game", gameid]
+        if APPIMAGE_PATH:
+            cmd = [APPIMAGE_PATH, "--game", gameid]
+            run_env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+        else:
+            cmd = [sys.executable, "-m", "faugus.runner", "--game", gameid]
+            run_env = subprocess_env()
         if with_logs:
             cmd.append("--logs")
 
         if game.runner == "Steam":
             self.update_last_played(gameid)
             self.sync_last_played_order(gameid)
-            subprocess.Popen(cmd, cwd=cwd, env=subprocess_env())
+            subprocess.Popen(cmd, cwd=cwd, env=run_env)
             return
 
         if gameid in self.running:
@@ -4517,7 +4565,7 @@ class Main(Gtk.ApplicationWindow, HiDpiMixin):
             self.update_icon()
             return
 
-        proc = subprocess.Popen(cmd, cwd=cwd, env=subprocess_env())
+        proc = subprocess.Popen(cmd, cwd=cwd, env=run_env)
 
         if not IS_FLATPAK or not self.auto_close_on_launch:
             self.running[gameid] = proc.pid
@@ -4650,6 +4698,9 @@ class Main(Gtk.ApplicationWindow, HiDpiMixin):
 
         add_game_dialog.combobox_launcher.set_active_id_silent(launcher_id)
         add_game_dialog.on_combobox_changed(add_game_dialog.combobox_launcher, skip_cleanup=True)
+
+        add_game_dialog.fill_from_executable(file_path)
+
         add_game_dialog.entry_path.set_text(file_path)
 
         add_game_dialog.present()
@@ -4687,6 +4738,7 @@ class Main(Gtk.ApplicationWindow, HiDpiMixin):
             if not edit_game_dialog.combobox_runner.set_active_id(game_runner):
                 edit_game_dialog.combobox_runner.set_active(0)
         edit_game_dialog.set_title_silently(game.title)
+        edit_game_dialog._artwork_title = game.title
         edit_game_dialog._steamgriddb_suggestion_id = getattr(game, "steamgriddb_id", "") or None
         edit_game_dialog._steamgriddb_steam_appid = game.path if game_runner == "Steam" else None
         edit_game_dialog.entry_path.set_text(game.path)
@@ -4696,7 +4748,6 @@ class Main(Gtk.ApplicationWindow, HiDpiMixin):
         edit_game_dialog.post_launch = game.post_launch
         edit_game_dialog.entry_game_arguments.set_text(game.game_arguments)
         edit_game_dialog.set_title(_("Edit %s") % game.title)
-        edit_game_dialog.entry_protonfix.set_text(game.protonfix)
         edit_game_dialog.grid_launcher.set_visible(False)
         edit_game_dialog.button_path_action.set_visible(False)
         edit_game_dialog.button_search.set_visible(True)
@@ -4741,6 +4792,7 @@ class Main(Gtk.ApplicationWindow, HiDpiMixin):
 
         edit_game_dialog.checkbox_sdl.set_active(game.sdl_enabled == True)
         edit_game_dialog.checkbox_no_sleep.set_active(game.no_sleep == True)
+        edit_game_dialog.checkbox_discord_rpc.set_active(game.discord_rpc == True)
 
         if edit_game_dialog.steam_shortcut_users:
             matched_user = self.find_steam_shortcut_user(game.title)
@@ -4897,8 +4949,9 @@ class Main(Gtk.ApplicationWindow, HiDpiMixin):
             destroy_and_release(add_game_dialog)
 
         if response_id == Gtk.ResponseType.OK:
-            if not add_game_dialog.validate_fields(entry="path+prefix"):
+            if not add_game_dialog.validate_fields(entry="path+prefix") or not add_game_dialog.validate_lossless():
                 return True
+            add_game_dialog.lossless_panel.save_location()
             launcher_id = add_game_dialog.combobox_launcher.get_active_id()
 
             prefix = os.path.normpath(add_game_dialog.entry_prefix.get_text())
@@ -4918,9 +4971,9 @@ class Main(Gtk.ApplicationWindow, HiDpiMixin):
                     return True
 
             path = add_game_dialog.entry_path.get_text()
+            add_game_dialog.launch_arguments_editor.save_presets()
             launch_arguments = add_game_dialog.launch_arguments
             game_arguments = add_game_dialog.entry_game_arguments.get_text()
-            protonfix = add_game_dialog.entry_protonfix.get_text()
             runner = add_game_dialog.selected_runner()
             addapp = add_game_dialog.addapp
             addapp_delay = add_game_dialog.addapp_delay
@@ -4972,12 +5025,14 @@ class Main(Gtk.ApplicationWindow, HiDpiMixin):
                 sdl_enabled = ""
                 addapp_enabled = ""
                 no_sleep = ""
+                discord_rpc = ""
             else:
                 mangohud = True if add_game_dialog.checkbox_mangohud.get_active() else ""
                 gamemode = True if add_game_dialog.checkbox_gamemode.get_active() else ""
                 sdl_enabled = True if add_game_dialog.checkbox_sdl.get_active() else ""
                 addapp_enabled = "addapp_enabled" if add_game_dialog.addapp_enabled else ""
                 no_sleep = True if add_game_dialog.checkbox_no_sleep.get_active() else ""
+                discord_rpc = True if add_game_dialog.checkbox_discord_rpc.get_active() else ""
 
             disable_umu = True if (
                 launcher_id == "linux" and add_game_dialog.combobox_runtime.get_active_id() == "disable-runtime"
@@ -4993,7 +5048,6 @@ class Main(Gtk.ApplicationWindow, HiDpiMixin):
                 mangohud,
                 gamemode,
                 sdl_enabled,
-                protonfix,
                 runner,
                 addapp_enabled,
                 addapp,
@@ -5017,6 +5071,7 @@ class Main(Gtk.ApplicationWindow, HiDpiMixin):
                 post_launch=add_game_dialog.post_launch,
                 steam_user=add_game_dialog.combobox_steam_user.get_active_id() if launcher_id == "steam" else "",
                 disable_umu=disable_umu,
+                discord_rpc=discord_rpc,
                 runtime=add_game_dialog.combobox_runtime.get_active_id()
             )
 
@@ -5311,11 +5366,13 @@ class Main(Gtk.ApplicationWindow, HiDpiMixin):
 
     def on_edit_dialog_response(self, dialog, response_id, edit_game_dialog, game):
         if response_id == Gtk.ResponseType.OK:
-            if not edit_game_dialog.validate_fields(entry="path+prefix"):
+            if not edit_game_dialog.validate_fields(entry="path+prefix") or not edit_game_dialog.validate_lossless():
                 return True
+            edit_game_dialog.lossless_panel.save_location()
             game.title = edit_game_dialog.entry_title.get_text()
             game.path = edit_game_dialog.entry_path.get_text()
             game.prefix = os.path.normpath(edit_game_dialog.entry_prefix.get_text())
+            edit_game_dialog.launch_arguments_editor.save_presets()
             game.launch_arguments = edit_game_dialog.launch_arguments
             game.pre_launch = edit_game_dialog.pre_launch
             game.post_launch = edit_game_dialog.post_launch
@@ -5323,7 +5380,6 @@ class Main(Gtk.ApplicationWindow, HiDpiMixin):
             game.mangohud = edit_game_dialog.checkbox_mangohud.get_active()
             game.gamemode = edit_game_dialog.checkbox_gamemode.get_active()
             game.sdl_enabled = edit_game_dialog.checkbox_sdl.get_active()
-            game.protonfix = edit_game_dialog.entry_protonfix.get_text()
             game.runner = edit_game_dialog.selected_runner()
             game.addapp_enabled = edit_game_dialog.addapp_enabled
             game.addapp = edit_game_dialog.addapp
@@ -5336,6 +5392,7 @@ class Main(Gtk.ApplicationWindow, HiDpiMixin):
             game.lossless_hdr = edit_game_dialog.lossless_hdr
             game.lossless_present = edit_game_dialog.lossless_present
             game.no_sleep = edit_game_dialog.checkbox_no_sleep.get_active()
+            game.discord_rpc = edit_game_dialog.checkbox_discord_rpc.get_active()
             game.steamgriddb_id = edit_game_dialog._steamgriddb_suggestion_id or ""
 
             game.addapp_bat = f"{os.path.dirname(expand_path(game.path))}/faugus-{game.gameid}.bat"
@@ -5440,7 +5497,8 @@ class Main(Gtk.ApplicationWindow, HiDpiMixin):
 
         game_directory = os.path.dirname(expand_path(game.path))
         desktop_file_content = build_desktop_file_content(
-            game.title, f'--game {game.gameid}', new_icon_path, game_directory
+            game.title, f'--game {game.gameid}', new_icon_path, game_directory,
+            game_wm_class({"gameid": game.gameid, "runner": game.runner, "launch_arguments": game.launch_arguments})
         )
 
         os.makedirs(APP_DIR, exist_ok=True)
@@ -5646,6 +5704,7 @@ class Settings(Gtk.Dialog):
         ("auto-close-on-launch", "checkbox_auto_close_on_launch", False),
         ("mangohud", "checkbox_mangohud", False),
         ("gamemode", "checkbox_gamemode", False),
+        ("discord-rpc-enabled", "checkbox_discord_rpc", False),
         ("sdl-enabled", "checkbox_sdl", False),
         ("no-sleep-enabled", "checkbox_no_sleep", False),
         ("splash-window-enabled", "checkbox_splash_window", True),
@@ -6054,6 +6113,8 @@ class Settings(Gtk.Dialog):
         self.checkbox_sdl.set_tooltip_text(_("May fix gamepad issues with some games"))
         self.checkbox_no_sleep = Gtk.CheckButton(label=_("No Sleep"))
         self.checkbox_no_sleep.set_tooltip_text(_("Prevents the system from suspending while gaming"))
+        self.checkbox_discord_rpc = Gtk.CheckButton(label="Discord RPC")
+        self.checkbox_discord_rpc.set_tooltip_text(_("Shows the running game as your Discord activity"))
 
         self.button_interface_sounds = Gtk.Button(label=_("Interface Sounds"))
         self.button_interface_sounds.connect("clicked", self.on_button_interface_sounds_clicked)
@@ -6224,9 +6285,10 @@ class Settings(Gtk.Dialog):
         grid_tools.attach(self.checkbox_mangohud, 0, 0, 1, 1)
         self.checkbox_mangohud.set_hexpand(True)
         grid_tools.attach(self.checkbox_gamemode, 0, 1, 1, 1)
-        grid_tools.attach(self.checkbox_no_sleep, 0, 2, 1, 1)
-        grid_tools.attach(self.checkbox_sdl, 0, 3, 1, 1)
-        grid_tools.attach(box_buttons, 2, 0, 1, 4)
+        grid_tools.attach(self.checkbox_discord_rpc, 0, 2, 1, 1)
+        grid_tools.attach(self.checkbox_no_sleep, 0, 3, 1, 1)
+        grid_tools.attach(self.checkbox_sdl, 0, 4, 1, 1)
+        grid_tools.attach(box_buttons, 2, 0, 1, 5)
 
         grid_logs.attach(self.button_clearlogs, 0, 0, 1, 1)
         self.button_clearlogs.set_hexpand(True)
@@ -6643,7 +6705,7 @@ class Settings(Gtk.Dialog):
         else:
             self.accent_color = "system"
 
-        apply_interface_customization(self.interface_theme, self.accent_color, self.theme_engine)
+        apply_interface_customization(self.interface_theme, self.accent_color, self.parent.theme_engine)
 
         self.parent.interface_theme = self.interface_theme
         self.parent.accent_color = self.accent_color
@@ -6801,7 +6863,7 @@ class Settings(Gtk.Dialog):
                 if self.entry_default_prefix.get_text() == "":
                     mark_invalid_widget(self.entry_default_prefix)
                     return
-                apply_interface_customization(self.interface_theme, self.accent_color, self.combobox_theme_engine.get_active_id())
+                apply_interface_customization(self.interface_theme, self.accent_color, self.parent.theme_engine)
                 self.update_envar_file()
                 self.update_config_file()
                 self.parent.manage_autostart_file(self.checkbox_autostart.get_active(), self.checkbox_minimized_startup.get_active())
@@ -6958,7 +7020,7 @@ class Settings(Gtk.Dialog):
                     global faugus_backup
                     faugus_backup = True
                     self.response(Gtk.ResponseType.OK)
-                destroy_and_release(dialog)
+                dialog.discard()
 
             restore_dialog.connect("response", on_restore_response)
             restore_dialog.present()
@@ -7161,7 +7223,6 @@ class Game:
         mangohud,
         gamemode,
         sdl_enabled,
-        protonfix,
         runner,
         addapp_enabled,
         addapp,
@@ -7187,6 +7248,7 @@ class Game:
         disable_umu="",
         runtime="",
         last_played="",
+        discord_rpc="",
     ):
         self.gameid = gameid
         self.title = title
@@ -7195,9 +7257,9 @@ class Game:
         self.game_arguments = game_arguments
         self.mangohud = mangohud
         self.gamemode = gamemode
+        self.discord_rpc = discord_rpc
         self.prefix = prefix
         self.sdl_enabled = sdl_enabled
-        self.protonfix = protonfix
         self.runner = runner
         self.addapp_enabled = addapp_enabled
         self.addapp = addapp
@@ -7421,6 +7483,7 @@ class DuplicateDialog(Gtk.Dialog):
 
         box_top = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         box_top.set_hexpand(True)
+        box_top.set_size_request(320, -1)
         box_top.set_margin_start(10)
         box_top.set_margin_end(10)
         box_top.set_margin_top(10)
@@ -7516,10 +7579,11 @@ class DeleteDialog(Gtk.Dialog):
         self.present()
 
 
-class AddGame(Gtk.Dialog, HiDpiMixin):
+class AddGame(Gtk.Dialog, HiDpiMixin, HookEntriesMixin, LaunchArgumentsMixin, AddAppMixin, LosslessMixin):
     def __init__(self, parent, interface_mode):
         super().__init__(title=_("New Game/App"), transient_for=parent)
         apply_titlebar_preference(self)
+        self.connect("notify::scale-factor", self.on_scale_factor_changed)
         hide_dialog_action_area(self)
         self.set_modal(True)
         self.set_resizable(False)
@@ -7536,7 +7600,8 @@ class AddGame(Gtk.Dialog, HiDpiMixin):
             and bool(cfg.config.get('steamgriddb-api-key', '').strip('"'))
         )
 
-        init_addon_defaults(self)
+        self.addapp_panel = AddAppPanel(self)
+        self.lossless_panel = LosslessPanel(self)
 
         os.makedirs(COVERS_DIR, exist_ok=True)
         os.makedirs(BANNERS_DIR, exist_ok=True)
@@ -7569,10 +7634,9 @@ class AddGame(Gtk.Dialog, HiDpiMixin):
 
         self.grid_page1 = Gtk.Grid()
         self.grid_page1.set_column_homogeneous(True)
-        self.grid_page1.set_column_spacing(10)
         self.grid_page2 = Gtk.Grid()
         self.grid_page2.set_column_homogeneous(True)
-        self.grid_page2.set_column_spacing(10)
+        self.launch_arguments_editor = LaunchArgumentsEditor()
 
         self.grid_launcher = build_grid(margin_bottom=False)
 
@@ -7585,6 +7649,7 @@ class AddGame(Gtk.Dialog, HiDpiMixin):
         self.grid_path = build_grid(margin_bottom=False)
 
         self.grid_runtime = build_grid(margin_bottom=False)
+        self.grid_runtime.set_visible(False)
 
         self.grid_prefix = build_grid(margin_bottom=False)
 
@@ -7595,15 +7660,12 @@ class AddGame(Gtk.Dialog, HiDpiMixin):
         self.grid_shortcut_icon = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         self.grid_shortcut_icon.set_valign(Gtk.Align.CENTER)
 
-        self.grid_protonfix = build_grid(margin_bottom=False)
-
-        self.grid_launch_settings = build_grid(margin_bottom=False)
+        self.grid_pre_launch, self.entry_pre_launch = build_hook_command_grid(
+            self, _("Pre-launch"), "pre_launch", _("Command or script to run before the game"))
+        self.grid_post_launch, self.entry_post_launch = build_hook_command_grid(
+            self, _("Post-launch"), "post_launch", _("Command or script to run after the game"))
 
         self.grid_game_arguments = build_grid(margin_bottom=False)
-
-        self.grid_lossless = build_grid(margin_bottom=False)
-
-        self.grid_addapp = build_grid(margin_bottom=False)
 
         self.grid_tools = build_grid()
 
@@ -7616,6 +7678,7 @@ class AddGame(Gtk.Dialog, HiDpiMixin):
         }
         .add-game-media-button {
             padding: 0;
+            margin: 0;
             border: none;
             box-shadow: none;
         }
@@ -7682,44 +7745,14 @@ class AddGame(Gtk.Dialog, HiDpiMixin):
 
         self._steamgriddb_suggestion_id = None
         self._steamgriddb_steam_appid = None
+        self._artwork_title = None
         self._suggestion_source = None
         self._suggestion_programmatic = False
         self._virtual_keyboard_active_for_title = False
 
         if self.steamgriddb_enabled:
-            self.popover_suggestion = Gtk.Popover()
-            self.popover_suggestion.set_has_arrow(False)
-            self.popover_suggestion.set_autohide(False)
-            self.popover_suggestion.add_css_class("suggestion-popover")
-            self.popover_suggestion.set_parent(self.entry_title)
-
-            self.listbox_suggestion = Gtk.ListBox()
-            self.listbox_suggestion.set_selection_mode(Gtk.SelectionMode.NONE)
-            self.listbox_suggestion.connect("row-activated", self.on_suggestion_row_activated)
-
-            suggestion_scroll = Gtk.ScrolledWindow()
-            suggestion_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-            suggestion_scroll.set_max_content_height(250)
-            suggestion_scroll.set_propagate_natural_height(True)
-            suggestion_scroll.set_size_request(300, -1)
-            suggestion_scroll.set_child(self.listbox_suggestion)
-
-            self.popover_suggestion.set_child(suggestion_scroll)
-
+            self.popover_suggestion = create_suggestion_popover(self.entry_title, self, self.on_title_suggestion_picked)
             self.entry_title.connect("changed", self.on_title_changed_for_suggestions)
-
-            title_key_controller = Gtk.EventControllerKey()
-            title_key_controller.connect("key-pressed", self.on_title_key_pressed)
-            self.entry_title.add_controller(title_key_controller)
-
-            title_suggestion_focus_controller = Gtk.EventControllerFocus()
-            title_suggestion_focus_controller.connect("leave", lambda c: self.on_title_focus_leave_for_suggestions())
-            self.entry_title.add_controller(title_suggestion_focus_controller)
-
-            suggestion_click_outside_controller = Gtk.GestureClick()
-            suggestion_click_outside_controller.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
-            suggestion_click_outside_controller.connect("pressed", self.on_dialog_click_for_suggestions)
-            self.add_controller(suggestion_click_outside_controller)
 
         self.label_path = Gtk.Label(label=_("Path"))
         self.label_path.set_halign(Gtk.Align.START)
@@ -7783,37 +7816,18 @@ class AddGame(Gtk.Dialog, HiDpiMixin):
         self.checkbox_custom_runner.connect("toggled", self.on_checkbox_custom_runner_toggled)
         self.combobox_runner = IdComboBox()
 
-        self.label_protonfix = Gtk.Label(label="Protonfix")
-        self.label_protonfix.set_halign(Gtk.Align.START)
-        self.entry_protonfix = Gtk.Entry()
-        self.entry_protonfix.set_tooltip_text("UMU ID")
-        self.button_search_protonfix = Gtk.Button()
-        self.button_search_protonfix.set_child(
-            Gtk.Image.new_from_icon_name("system-search-symbolic"))
-        self.button_search_protonfix.connect("clicked", on_button_search_protonfix_clicked)
-        self.button_search_protonfix.set_size_request(50, -1)
-
         self.label_game_arguments = Gtk.Label(label=_("Game Arguments"))
         self.label_game_arguments.set_halign(Gtk.Align.START)
         self.entry_game_arguments = Gtk.Entry()
         self.entry_game_arguments.set_tooltip_text("-d3d11 -fullscreen")
-
-        self.button_launch_settings = Gtk.Button(label=_("Launch Settings"))
-        self.button_launch_settings.connect("clicked", self.on_button_launch_settings_clicked)
-
-        self.button_addapp = Gtk.Button(label=_("Additional Application"))
-        self.button_addapp.connect("clicked", self.on_button_addapp_clicked)
-        self.button_addapp.set_tooltip_text(
-            _("Additional application to run with the game"))
-
-        self.button_lossless = Gtk.Button(label=_("Lossless Scaling Frame Generation"))
-        self.button_lossless.connect("clicked", self.on_button_lossless_clicked)
 
         create_mangohud_gamemode_checkboxes(self)
         self.checkbox_sdl = Gtk.CheckButton(label="SDL")
         self.checkbox_sdl.set_tooltip_text(_("May fix gamepad issues with some games"))
         self.checkbox_no_sleep = Gtk.CheckButton(label=_("No Sleep"))
         self.checkbox_no_sleep.set_tooltip_text(_("Prevents the system from suspending while gaming"))
+        self.checkbox_discord_rpc = Gtk.CheckButton(label="Discord RPC")
+        self.checkbox_discord_rpc.set_tooltip_text(_("Shows the running game as your Discord activity"))
 
         self.button_winecfg = Gtk.Button(label="Winecfg")
         self.button_winecfg.set_size_request(120, -1)
@@ -7854,9 +7868,9 @@ class AddGame(Gtk.Dialog, HiDpiMixin):
         icon_click_secondary = Gtk.GestureClick()
         icon_click_secondary.set_button(Gdk.BUTTON_SECONDARY)
         if self.steamgriddb_enabled:
-            icon_click_secondary.connect("pressed", lambda g, n, x, y: self.on_image_clicked(g, n, x, y, "icon"))
+            icon_click_secondary.connect("released", lambda g, n, x, y: self.on_image_clicked(g, n, x, y, "icon"))
         else:
-            icon_click_secondary.connect("pressed", lambda g, n, x, y: self.on_button_shortcut_icon_clicked(self.button_shortcut_icon))
+            icon_click_secondary.connect("released", lambda g, n, x, y: self.on_button_shortcut_icon_clicked(self.button_shortcut_icon))
         self.button_shortcut_icon.add_controller(icon_click_secondary)
 
         self.button_cancel = Gtk.Button(label=_("Cancel"))
@@ -7882,8 +7896,8 @@ class AddGame(Gtk.Dialog, HiDpiMixin):
         self.tab_switcher.set_margin_end(10)
 
         tab_buttons = [
-            ("page1", _("Game/App")),
-            ("page2", _("Tools")),
+            ("page1", _("General")),
+            ("page2", _("Settings")),
         ]
         first_button = None
         tab_button_widgets = []
@@ -7934,14 +7948,11 @@ class AddGame(Gtk.Dialog, HiDpiMixin):
             picture.set_valign(Gtk.Align.FILL)
             content, spinner = wrap_with_spinner(picture, dim_shape="cover")
             button = Gtk.Button()
-            button.set_size_request(260, 390)
-            button.set_margin_top(10)
-            button.set_margin_bottom(10)
-            button.set_margin_start(10)
-            button.set_margin_end(10)
+            button.set_size_request(300, -1)
+            button.set_hexpand(True)
             button.set_vexpand(True)
-            button.set_valign(Gtk.Align.CENTER)
-            button.set_halign(Gtk.Align.CENTER)
+            button.set_halign(Gtk.Align.FILL)
+            button.set_valign(Gtk.Align.FILL)
             button.set_overflow(Gtk.Overflow.HIDDEN)
             button.set_child(content)
             button.add_css_class("add-game-media-button")
@@ -7949,12 +7960,22 @@ class AddGame(Gtk.Dialog, HiDpiMixin):
             button.connect("clicked", on_cover_primary_click)
             click_secondary = Gtk.GestureClick()
             click_secondary.set_button(Gdk.BUTTON_SECONDARY)
-            click_secondary.connect("pressed", self.on_image_clicked)
+            click_secondary.connect("released", self.on_image_clicked)
             button.add_controller(click_secondary)
-            return picture, button, spinner
+            frame = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+            frame.set_size_request(300, 450)
+            frame.set_hexpand(True)
+            frame.set_margin_top(10)
+            frame.set_margin_bottom(10)
+            frame.set_margin_start(5)
+            frame.set_margin_end(10)
+            frame.set_valign(Gtk.Align.CENTER)
+            frame.append(button)
+            keep_banner_ratio(frame, frame, COVER_RATIO, 300)
+            return picture, button, spinner, frame
 
-        self.image_cover, self.button_cover, self.spinner_cover1 = build_cover_button()
-        self.image_cover2, self.button_cover2, self.spinner_cover2 = build_cover_button()
+        self.image_cover, self.button_cover, self.spinner_cover1, self.frame_cover = build_cover_button()
+        self.image_cover2, self.button_cover2, self.spinner_cover2, self.frame_cover2 = build_cover_button()
 
         self.picture_banner1 = new_picture()
         self.picture_banner1.set_can_shrink(True)
@@ -7980,7 +8001,7 @@ class AddGame(Gtk.Dialog, HiDpiMixin):
 
         banner_click_secondary1 = Gtk.GestureClick()
         banner_click_secondary1.set_button(Gdk.BUTTON_SECONDARY)
-        banner_click_secondary1.connect("pressed", lambda g, n, x, y: self.on_image_clicked(g, n, x, y, "banner"))
+        banner_click_secondary1.connect("released", lambda g, n, x, y: self.on_image_clicked(g, n, x, y, "banner"))
         self.button_banner1.add_controller(banner_click_secondary1)
 
         self.banner_preview1_overlay, self.spinner_banner1 = wrap_with_spinner(self.banner_preview1)
@@ -8018,19 +8039,21 @@ class AddGame(Gtk.Dialog, HiDpiMixin):
 
         self.grid_page1.attach(page1, 0, 1, 1, 1)
         if interface_mode in ("Covers", "Carrousel"):
-            self.grid_page1.attach(self.button_cover, 1, 1, 1, 1)
+            self.grid_page1.attach(self.frame_cover, 1, 1, 1, 1)
         page1.set_hexpand(True)
+        page1.set_size_request(320, -1)
 
-        self.view_stack.add_titled(self.grid_page1, "page1", _("Game/App"))
+        self.view_stack.add_titled(self.grid_page1, "page1", _("General"))
 
         page2 = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
 
         self.grid_page2.attach(page2, 0, 1, 1, 1)
         if interface_mode in ("Covers", "Carrousel"):
-            self.grid_page2.attach(self.button_cover2, 1, 1, 1, 1)
+            self.grid_page2.attach(self.frame_cover2, 1, 1, 1, 1)
         page2.set_hexpand(True)
+        page2.set_size_request(320, -1)
 
-        self.view_stack.add_titled(self.grid_page2, "page2", _("Tools"))
+        self.view_stack.add_titled(self.grid_page2, "page2", _("Settings"))
 
         self.grid_launcher.attach(self.combobox_launcher, 1, 0, 1, 1)
         self.combobox_launcher.set_hexpand(True)
@@ -8094,23 +8117,9 @@ class AddGame(Gtk.Dialog, HiDpiMixin):
 
             keep_banner_ratio(self.banner_preview1_overlay, self.banner_preview1_overlay)
 
-        self.grid_protonfix.attach(self.label_protonfix, 0, 0, 1, 1)
-        self.grid_protonfix.attach(self.entry_protonfix, 0, 1, 3, 1)
-        self.entry_protonfix.set_hexpand(True)
-        self.grid_protonfix.attach(self.button_search_protonfix, 3, 1, 1, 1)
-
         self.grid_game_arguments.attach(self.label_game_arguments, 0, 0, 4, 1)
         self.grid_game_arguments.attach(self.entry_game_arguments, 0, 1, 4, 1)
         self.entry_game_arguments.set_hexpand(True)
-
-        self.grid_lossless.attach(self.button_lossless, 0, 0, 1, 1)
-        self.button_lossless.set_hexpand(True)
-
-        self.grid_launch_settings.attach(self.button_launch_settings, 0, 0, 1, 1)
-        self.button_launch_settings.set_hexpand(True)
-
-        self.grid_addapp.attach(self.button_addapp, 0, 0, 1, 1)
-        self.button_addapp.set_hexpand(True)
 
         box_buttons.append(self.button_winetricks)
         box_buttons.append(self.button_winecfg)
@@ -8120,18 +8129,50 @@ class AddGame(Gtk.Dialog, HiDpiMixin):
         self.checkbox_mangohud.set_hexpand(True)
         self.grid_tools.attach(self.checkbox_gamemode, 0, 1, 1, 1)
         self.checkbox_gamemode.set_hexpand(True)
-        self.grid_tools.attach(self.checkbox_no_sleep, 0, 2, 1, 1)
+        self.grid_tools.attach(self.checkbox_discord_rpc, 0, 2, 1, 1)
+        self.checkbox_discord_rpc.set_hexpand(True)
+        self.grid_tools.attach(self.checkbox_no_sleep, 0, 3, 1, 1)
         self.checkbox_no_sleep.set_hexpand(True)
-        self.grid_tools.attach(self.checkbox_sdl, 0, 3, 1, 1)
+        self.grid_tools.attach(self.checkbox_sdl, 0, 4, 1, 1)
         self.checkbox_sdl.set_hexpand(True)
-        self.grid_tools.attach(box_buttons, 2, 0, 1, 4)
+        self.grid_tools.attach(box_buttons, 2, 0, 1, 5)
 
-        page2.append(self.grid_protonfix)
-        page2.append(self.grid_game_arguments)
-        page2.append(self.grid_launch_settings)
-        page2.append(self.grid_addapp)
-        page2.append(self.grid_lossless)
-        page2.append(self.grid_tools)
+        settings_stack = Gtk.Stack()
+
+        box_tools = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        box_tools.append(self.grid_game_arguments)
+        box_tools.append(self.grid_pre_launch)
+        box_tools.append(self.grid_post_launch)
+        box_tools.append(self.grid_tools)
+        settings_stack.add_named(box_tools, "tools")
+        settings_stack.add_named(self.addapp_panel.widget, "addapp")
+        settings_stack.add_named(self.lossless_panel.widget, "lossless")
+
+        settings_stack.add_named(self.launch_arguments_editor.widget, "launch_arguments")
+
+        self.combobox_settings = IdComboBox()
+        self.populate_combobox_settings(True)
+        self.combobox_settings.connect("changed", lambda combobox: combobox.get_active_id() and settings_stack.set_visible_child_name(combobox.get_active_id()))
+
+        grid_settings_section = build_grid(margin_bottom=False)
+        grid_settings_section.attach(self.combobox_settings, 0, 0, 1, 1)
+        self.combobox_settings.set_hexpand(True)
+
+        page2.append(grid_settings_section)
+        page2.append(settings_stack)
+
+        for widget in () if interface_mode not in ("Covers", "Carrousel") else (
+            *widget_children(page1),
+            grid_settings_section,
+            self.grid_tools,
+            self.addapp_panel.widget,
+            self.lossless_panel.widget,
+            self.launch_arguments_editor.widget,
+            self.grid_game_arguments,
+            self.grid_pre_launch,
+            self.grid_post_launch,
+        ):
+            widget.set_margin_end(5)
 
         bottom_box = build_bottom_button_box(self.button_cancel, self.button_ok)
         bottom_box.set_margin_top(10)
@@ -8151,6 +8192,7 @@ class AddGame(Gtk.Dialog, HiDpiMixin):
         self.checkbox_mangohud.set_active(self.default_mangohud)
         self.checkbox_gamemode.set_active(self.default_gamemode)
         self.checkbox_no_sleep.set_active(self.default_no_sleep)
+        self.checkbox_discord_rpc.set_active(self.default_discord_rpc)
         self.checkbox_sdl.set_active(self.default_sdl_enabled)
 
         disable_mangohud_gamemode_if_missing(self)
@@ -8162,8 +8204,8 @@ class AddGame(Gtk.Dialog, HiDpiMixin):
             self.combobox_steam_shortcut_user.set_tooltip_text(_("No Steam users found"))
 
         if not os.path.exists(LSFGVK_PATH):
-            self.button_lossless.set_sensitive(False)
-            self.button_lossless.set_tooltip_text(_("Vulkan Layer not found"))
+            self.lossless_panel.widget.set_sensitive(False)
+            self.lossless_panel.widget.set_tooltip_text(_("Vulkan Layer not found"))
 
         self.button_shortcut_icon.set_child(self.set_image_shortcut_icon())
 
@@ -8203,30 +8245,23 @@ class AddGame(Gtk.Dialog, HiDpiMixin):
         shutil.copyfile(icon_path, os.path.expanduser(self.icon_temp))
         self.refresh_icon_preview()
 
-    def on_button_launch_settings_clicked(self, widget):
-        def on_result(result, pre_launch, post_launch):
-            self.launch_arguments = result
-            self.pre_launch = pre_launch
-            self.post_launch = post_launch
-        show_launch_arguments_dialog(self, self.launch_arguments, self.pre_launch, self.post_launch, on_result)
+    def populate_combobox_settings(self, show_addapp):
+        active_id = self.combobox_settings.get_active_id()
+        self.combobox_settings.remove_all()
+        self.combobox_settings.append("tools", _("Tools"))
+        self.combobox_settings.append("launch_arguments", _("Launch Arguments"))
+        if show_addapp:
+            self.combobox_settings.append("addapp", _("Additional Application"))
+        self.combobox_settings.append("lossless", _("Lossless Scaling Frame Generation"))
+        if not self.combobox_settings.set_active_id(active_id):
+            self.combobox_settings.set_active_id("tools")
 
-    def on_button_addapp_clicked(self, widget):
-        def on_result(result):
-            (self.addapp_enabled, self.addapp,
-             self.addapp_delay, self.addapp_first) = result
-        show_addapp_dialog(
-            self, self.addapp_enabled, self.addapp,
-            self.addapp_delay, self.addapp_first, on_result)
-
-    def on_button_lossless_clicked(self, widget):
-        def on_result(result):
-            (self.lossless_enabled, self.lossless_multiplier,
-             self.lossless_flow, self.lossless_performance,
-             self.lossless_hdr, self.lossless_present) = result
-        show_lossless_dialog(
-            self, self.lossless_enabled, self.lossless_multiplier,
-            self.lossless_flow, self.lossless_performance,
-            self.lossless_hdr, self.lossless_present, on_result)
+    def validate_lossless(self):
+        if self.lossless_panel.validate():
+            return True
+        self.tab_button_widgets[self.tab_names.index("page2")].set_active(True)
+        self.combobox_settings.set_active_id("lossless")
+        return False
 
     def on_image_clicked(self, gesture, n_press, x, y, category="cover"):
         self._menu_category = category
@@ -8362,6 +8397,7 @@ class AddGame(Gtk.Dialog, HiDpiMixin):
         button_cancel.connect("clicked", lambda x: dialog.response(Gtk.ResponseType.CANCEL))
 
         box_top = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        box_top.set_size_request(320, -1)
         box_top.set_margin_start(10)
         box_top.set_margin_end(10)
         box_top.set_margin_top(10)
@@ -8451,6 +8487,9 @@ class AddGame(Gtk.Dialog, HiDpiMixin):
     def refresh_banner_preview(self):
         self.update_banner_preview(self.banner_path_temp)
 
+    def on_scale_factor_changed(self, widget, pspec):
+        self.update_image_cover()
+
     def apply_downloaded_artwork(self, category, content):
         if category == "icon":
             content = resize_icon_bytes(normalize_icon_bytes(content), 256)
@@ -8474,7 +8513,7 @@ class AddGame(Gtk.Dialog, HiDpiMixin):
             self.button_banner1.remove_css_class("banner-placeholder")
 
         def load():
-            texture = Gdk.Texture.new_for_pixbuf(safe_load_pixbuf(banner_path, None, None, False))
+            texture = load_full_texture(banner_path)
             idle_add_while_open(closed_event, show, texture)
 
         if banner_path and os.path.isfile(banner_path):
@@ -8565,10 +8604,10 @@ class AddGame(Gtk.Dialog, HiDpiMixin):
 
                 api_url = f"https://steamgrid.usebottles.com/api/search/{game_name}"
                 try:
-                    response = requests.get(api_url)
+                    response = requests.get(api_url, timeout=15)
                     response.raise_for_status()
                     image_url = response.text.strip('"')
-                    content = verified_content(requests.get(image_url))
+                    content = verified_content(requests.get(image_url, timeout=15))
                     idle_add_while_open(closed_event, self.apply_downloaded_artwork, "cover", content)
 
                 except requests.RequestException as e:
@@ -8593,14 +8632,17 @@ class AddGame(Gtk.Dialog, HiDpiMixin):
         def show(texture):
             if request != self._cover_request:
                 return
-            surface = HiDpiPaintable(texture, 260, 390)
+            surface = HiDpiPaintable(texture, 300, 450)
             self.image_cover.set_paintable(surface)
             self.image_cover2.set_paintable(surface)
             self.button_cover.remove_css_class("cover-empty")
             self.button_cover2.remove_css_class("cover-empty")
 
+        scale = self.device_scale()
+
         def load():
-            texture = Gdk.Texture.new_for_pixbuf(safe_load_pixbuf(cover_path, None, None, False))
+            texture = Gdk.Texture.new_for_pixbuf(load_fitted_pixbuf(cover_path, 300 * scale, 450 * scale))
+            release_unused_memory()
             idle_add_while_open(closed_event, show, texture)
 
         if os.path.isfile(cover_path):
@@ -8614,48 +8656,16 @@ class AddGame(Gtk.Dialog, HiDpiMixin):
     def on_entry_focus_out(self):
         if self._steamgriddb_suggestion_id is not None:
             return
-        if self.entry_title.get_text() != "":
+        title = self.entry_title.get_text()
+        if title == self._artwork_title:
+            return
+        self._artwork_title = title
+        if title != "":
             self.get_artwork()
         else:
             if os.path.isfile(self.cover_path_temp):
                 os.remove(self.cover_path_temp)
             self.update_image_cover()
-
-    def on_title_key_pressed(self, controller, keyval, keycode, state):
-        if keyval == Gdk.KEY_Escape and self.popover_suggestion.get_visible():
-            self.popover_suggestion.popdown()
-            return True
-        return False
-
-    def on_title_focus_leave_for_suggestions(self):
-        closed_event = self.closed_event
-        entry_title = self.entry_title
-
-        def check():
-            if closed_event.is_set():
-                return False
-            root = entry_title.get_root()
-            w = root.get_focus() if root else None
-            while w is not None:
-                if w is self.popover_suggestion:
-                    return False
-                w = w.get_parent()
-            self.popover_suggestion.popdown()
-            return False
-
-        GLib.idle_add(check)
-
-    def on_dialog_click_for_suggestions(self, gesture, n_press, x, y):
-        if not self.popover_suggestion.get_visible():
-            return
-
-        w = self.pick(x, y, Gtk.PickFlags.DEFAULT)
-        while w is not None:
-            if w is self.popover_suggestion or w is self.entry_title:
-                return
-            w = w.get_parent()
-
-        self.popover_suggestion.popdown()
 
     def on_title_changed_for_suggestions(self, entry):
         if self._suggestion_programmatic or self._virtual_keyboard_active_for_title:
@@ -8702,30 +8712,7 @@ class AddGame(Gtk.Dialog, HiDpiMixin):
         if self.entry_title.get_text().strip() != term:
             return
 
-        child = self.listbox_suggestion.get_first_child()
-        while child:
-            nxt = child.get_next_sibling()
-            self.listbox_suggestion.remove(child)
-            child = nxt
-
-        if not suggestions:
-            self.popover_suggestion.popdown()
-            return
-
-        for item in suggestions:
-            row = Gtk.ListBoxRow()
-            label = Gtk.Label(label=item["name"])
-            label.set_halign(Gtk.Align.START)
-            label.set_margin_start(8)
-            label.set_margin_end(8)
-            label.set_margin_top(6)
-            label.set_margin_bottom(6)
-            row.set_child(label)
-            row.steamgriddb_id = item["id"]
-            row.steamgriddb_name = item["name"]
-            self.listbox_suggestion.append(row)
-
-        self.popover_suggestion.popup()
+        self.popover_suggestion.populate(suggestions)
 
     def set_title_silently(self, text):
         self._suggestion_programmatic = True
@@ -8736,8 +8723,8 @@ class AddGame(Gtk.Dialog, HiDpiMixin):
         self.set_title_silently(re.sub(r'\s*\(\d{4}\)\s*$', '', name).strip())
         self._steamgriddb_suggestion_id = game_id
 
-    def on_suggestion_row_activated(self, listbox, row):
-        self.apply_title_suggestion(row.steamgriddb_name, row.steamgriddb_id)
+    def on_title_suggestion_picked(self, item):
+        self.apply_title_suggestion(item["name"], item["id"])
         self.popover_suggestion.popdown()
         self.entry_title.grab_focus_without_selecting()
         self.get_artwork()
@@ -8764,12 +8751,12 @@ class AddGame(Gtk.Dialog, HiDpiMixin):
         self.checkbox_shortcut_desktop.set_active(False)
         self.checkbox_shortcut_appmenu.set_active(False)
         self.checkbox_shortcut_steam.set_active(False)
-        self.entry_protonfix.set_text("")
         self.entry_game_arguments.set_text("")
         self.checkbox_mangohud.set_active(self.default_mangohud)
         self.checkbox_gamemode.set_active(self.default_gamemode)
         self.checkbox_sdl.set_active(self.default_sdl_enabled)
         self.checkbox_no_sleep.set_active(self.default_no_sleep)
+        self.checkbox_discord_rpc.set_active(self.default_discord_rpc)
         self.button_shortcut_icon.set_child(self.set_image_shortcut_icon())
         if os.path.isfile(self.cover_path_temp):
             os.remove(self.cover_path_temp)
@@ -8802,8 +8789,7 @@ class AddGame(Gtk.Dialog, HiDpiMixin):
         self.button_winetricks.set_visible(False)
         self.button_winecfg.set_visible(False)
         self.button_run.set_visible(False)
-        self.grid_protonfix.set_visible(False)
-        self.grid_addapp.set_visible(False)
+        self.populate_combobox_settings(False)
         self.checkbox_sdl.set_visible(False)
         self.checkbox_no_sleep.set_visible(True)
         self.checkbox_shortcut_steam.set_visible(True)
@@ -8824,8 +8810,7 @@ class AddGame(Gtk.Dialog, HiDpiMixin):
             self.button_winetricks.set_visible(True)
             self.button_winecfg.set_visible(True)
             self.button_run.set_visible(True)
-            self.grid_protonfix.set_visible(True)
-            self.grid_addapp.set_visible(True)
+            self.populate_combobox_settings(True)
             self.checkbox_sdl.set_visible(True)
 
         elif active_id == "linux":
@@ -8850,7 +8835,6 @@ class AddGame(Gtk.Dialog, HiDpiMixin):
             self.button_winetricks.set_visible(True)
             self.button_winecfg.set_visible(True)
             self.button_run.set_visible(True)
-            self.grid_protonfix.set_visible(True)
             self.checkbox_sdl.set_visible(True)
             self.button_shortcut_icon.set_visible(self.steamgriddb_enabled)
 
@@ -8913,6 +8897,7 @@ class AddGame(Gtk.Dialog, HiDpiMixin):
         self.default_gamemode = cfg.config.get('gamemode') == 'True'
         self.default_sdl_enabled = cfg.config.get('sdl-enabled') == 'True'
         self.default_no_sleep = cfg.config.get('no-sleep-enabled') == 'True'
+        self.default_discord_rpc = cfg.config.get('discord-rpc-enabled') == 'True'
 
     def record_created_prefix(self, prefix):
         if prefix and os.path.isdir(prefix) and prefix not in self.created_prefixes:
@@ -9040,6 +9025,23 @@ class AddGame(Gtk.Dialog, HiDpiMixin):
         image = new_icon(surface)
 
         return image
+
+    def fill_from_executable(self, path):
+        def set_title(title):
+            if not self.entry_title.get_text().strip():
+                self.set_title_silently(title)
+                self._artwork_title = title
+                self.get_artwork()
+
+        def extract():
+            title = extract_exe_title(path) or os.path.splitext(os.path.basename(path))[0]
+            if title:
+                idle_add_while_open(self.closed_event, set_title, title)
+            if not self.steamgriddb_enabled:
+                status = self.extract_shortcut_icon(path)
+                idle_add_while_open(self.closed_event, self.apply_shortcut_icon_status, status)
+
+        run_in_background(extract)
 
     def extract_shortcut_icon(self, path):
         os.makedirs(self.icon_directory, exist_ok=True)
@@ -9217,13 +9219,7 @@ class AddGame(Gtk.Dialog, HiDpiMixin):
             if response == Gtk.ResponseType.ACCEPT:
                 path = dialog_fc.get_file().get_path()
 
-                if not self.steamgriddb_enabled:
-                    def extract():
-                        status = self.extract_shortcut_icon(path)
-                        idle_add_while_open(self.closed_event, self.apply_shortcut_icon_status, status)
-
-                    run_in_background(extract)
-
+                self.fill_from_executable(path)
                 self.entry_path.set_text(path)
 
             destroy_and_release(dialog_fc)
@@ -9261,11 +9257,9 @@ class AddGame(Gtk.Dialog, HiDpiMixin):
         self.entry_prefix.remove_css_class("entry")
         self.entry_path.remove_css_class("entry")
 
-        page1_button = self.tab_button_widgets[self.tab_names.index("page1")]
-
         if self.grid_steam_title.get_visible() and not self.combobox_steam_title.get_active_text():
             mark_invalid_widget(self.combobox_steam_title, "combobox")
-            page1_button.set_active(True)
+            self.tab_button_widgets[self.tab_names.index("page1")].set_active(True)
 
         required = {
             "prefix": [(self.entry_title, title), (self.entry_prefix, prefix)],
@@ -9276,12 +9270,12 @@ class AddGame(Gtk.Dialog, HiDpiMixin):
         for widget in invalid:
             mark_invalid_widget(widget)
         if invalid:
-            page1_button.set_active(True)
+            self.tab_button_widgets[self.tab_names.index("page1")].set_active(True)
             return False
         return True
 
 
-def build_desktop_file_content(title, exec_args, icon_path, working_directory):
+def build_desktop_file_content(title, exec_args, icon_path, working_directory, wm_class=None):
     if IS_FLATPAK:
         exec_line = f'Exec=flatpak run --command={LAUNCHER_PATH} io.github.Faugus.faugus-launcher {LAUNCHER_MODULE_ARGS}{exec_args}\n'
     else:
@@ -9295,6 +9289,7 @@ def build_desktop_file_content(title, exec_args, icon_path, working_directory):
         f'Type=Application\n'
         f'Categories=Game;\n'
         f'Path={working_directory}\n'
+        + (f'StartupWMClass={wm_class}\n' if wm_class else '')
     )
 
 

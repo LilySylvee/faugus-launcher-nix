@@ -130,7 +130,7 @@ def _migrate_artwork_directories():
 
 
 def _migrate_games_json_fields():
-    from faugus.utils import load_json_file_or_none, save_json_file
+    from faugus.core import load_json_file_or_none, save_json_file
 
     games = load_json_file_or_none(GAMES_JSON)
     if not games:
@@ -149,6 +149,12 @@ def _migrate_games_json_fields():
     for game in games:
         if not isinstance(game, dict):
             continue
+        if "protonfix" in game:
+            protonfix = game.pop("protonfix")
+            if protonfix:
+                args = game.get("launch_arguments", "")
+                game["launch_arguments"] = f"{args}\nGAMEID={protonfix}" if args else f"GAMEID={protonfix}"
+            changed = True
         for old_field, new_field in field_renames.items():
             if old_field in game:
                 game[new_field] = game.pop(old_field)
@@ -159,7 +165,7 @@ def _migrate_games_json_fields():
 
 
 def _migrate_config_json_values():
-    from faugus.utils import latest_installed_umu_proton, load_json_file_or_none, save_json_file
+    from faugus.core import latest_installed_umu_proton, load_json_file_or_none, save_json_file
 
     config = load_json_file_or_none(CONFIG_FILE_DIR)
     if not config:
@@ -234,7 +240,7 @@ def _migrate_config_json_values():
 
 
 def _migrate_filechooser_folder_keys():
-    from faugus.utils import load_json_file_or_none, save_json_file
+    from faugus.core import load_json_file_or_none, save_json_file
 
     folders = load_json_file_or_none(FILECHOOSER_FOLDERS_FILE)
     if not folders:
@@ -545,7 +551,7 @@ def fix_legacy_shortcut_icons():
     except Exception:
         pass
     try:
-        from faugus.utils import update_games_json
+        from faugus.core import update_games_json
         update_games_json()
     except Exception:
         pass

@@ -2,7 +2,9 @@
 <component type="desktop-application">
   <id>io.github.Faugus.faugus-launcher</id>
   <name>Faugus</name>
-  <developer_name>Faugus</developer_name>
+  <developer id="io.github.faugus">
+    <name>Faugus</name>
+  </developer>
   <summary>A simple and lightweight app for running games using UMU-Launcher</summary>
   <url type="homepage">https://github.com/Faugus/faugus-launcher</url>
   <url type="donation">https://ko-fi.com/faugus</url>
@@ -15,6 +17,7 @@
     <color type="primary" scheme_preference="dark">#00334E</color>
   </branding>
   <description>
+    <p>Faugus is a simple and lightweight application for running Windows games using UMU-Launcher.</p>
     <p>Main Features:</p>
     <ul>
       <li>Play Windows games using Proton</li>
@@ -69,16 +72,12 @@
       <caption>Main window: Carrousel interface mode</caption>
     </screenshot>
     <screenshot>
-      <image>https://raw.githubusercontent.com/Faugus/faugus-launcher/01b91cb6/screenshots/add-main.png</image>
+      <image>https://raw.githubusercontent.com/Faugus/faugus-launcher/1bd58dfb/screenshots/add-main.png</image>
       <caption>Add/Edit Game: Main</caption>
     </screenshot>
     <screenshot>
-      <image>https://raw.githubusercontent.com/Faugus/faugus-launcher/1300d99/screenshots/add-tool.png</image>
+      <image>https://raw.githubusercontent.com/Faugus/faugus-launcher/585c88b5/screenshots/add-tool.png</image>
       <caption>Add/Edit Game: Tools</caption>
-    </screenshot>
-    <screenshot>
-      <image>https://raw.githubusercontent.com/Faugus/faugus-launcher/e54c4d4/screenshots/launch-settings.png</image>
-      <caption>Add/Edit Game: Launch Settings</caption>
     </screenshot>
     <screenshot>
       <image>https://raw.githubusercontent.com/Faugus/faugus-launcher/01b91cb6/screenshots/settings-general.png</image>
@@ -94,29 +93,13 @@
     </screenshot>
   </screenshots>
   <releases>
-    <release version="2.5.4" date="2026-10-27">
+    <release version="2.5.9" date="2026-11-19">
       <description>
         <ul>
-          <li>Added an option to auto-hide widgets on the main screen.</li>
-          <li>Added a progress bar to the splash window.</li>
-          <li>Updated the splash window strings.</li>
-          <li>Added tooltips to most options in the Settings window.</li>
-          <li>Most settings can now be changed in real time without restarting the app. Settings that still require a restart are marked with an asterisk (*) after their names.</li>
-          <li>The gamecontrollerdb is now updated weekly.</li>
-          <li>Categories in the Overview panel are now sorted alphabetically.</li>
-          <li>Implemented smooth scrolling.</li>
-          <li>Kept Proton runners read-only during extraction. Thanks, @vsharha.</li>
-          <li>Long game titles are now truncated in List mode to prevent the window from stretching.</li>
-          <li>The absolute path is now set for PROTONPATH to prevent issues.</li>
-          <li>Improved carousel animations.</li>
-          <li>Fixed some inconsistencies in interface customization.</li>
-          <li>Fixed an issue where scrolling would stop before reaching the end when navigating through games using the keyboard or gamepad.</li>
-          <li>Fixed an issue where the post-launch script would be killed when closing the game.</li>
-          <li>Covers and banners are now loaded on demand.</li>
-          <li>Images are resized to match their display scale.</li>
-          <li>Image memory is now freed when scrolling.</li>
-          <li>Banners are now loaded in a separate thread.</li>
-          <li>Removed and modified visual effects to reduce rendering overhead.</li>
+          <li>Ctrl+F now focuses the search field, and ESC clears it.</li>
+          <li>Added timeouts for cover search requests.</li>
+          <li>Fixed an issue where the Splash Window would get stuck when there was no internet connection.</li>
+          <li>Fixed the Auto-close feature not working in the AppImage.</li>
           <li>Updated translations.</li>
         </ul>
       </description>
